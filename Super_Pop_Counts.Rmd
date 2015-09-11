@@ -1,0 +1,518 @@
+---
+title: "Estimating Super Populations from Count Data"
+author: "Daniel Hocking"
+date: "April 27, 2015"
+output: html_document
+---
+
+Assume 100 individuals in the super population.
+
+**Robust (hierarchical) Sampling of a Closed Population:**
+Survey 3 times in a row (repeated  with independent or dependent observers or with temporary removal sampling. I will do with independent passes for this example), wait a couple days or a week, repeat the sampling. Do this for a total of 3 primary periods and 9 total secondary samples over the course of a month. 
+
+**Assume:**
+
+1. Demographic closure across all primary samples
+
+2. When surface active there is a random binomial process of detecting any individual. All surface-active individuals have an equal probability of being detected.
+
+```{r, echo=FALSE, results='hide'}
+library(rjags)
+library(parallel)
+```
+
+```{r setup for all scenarios}
+lambda <- 100
+#individuals <- 1:N
+# probability of being on the surface
+n_sites <- 100
+n_pp <- 3
+n_ss <- 3
+p_detect <- 0.70 # prob that if on surface you detect the individual
+
+```
+
+## Scenario 1:
+
+All individuals have an equal probability of being on the surface on any given night (no inidividual-level response to conditions)
+
+```{r create individual data}
+# i sites
+# j primary periods
+# k secondary samples within each primary period
+
+# surface probability: same for all individuals
+p_surf <- 0.50
+
+N <- NA_integer_
+n <- matrix(NA_integer_, nrow = n_sites, ncol = n_pp)
+count <- array(NA_integer_, dim = c(n_sites, n_pp, n_ss))
+
+for(i in 1:n_sites) {
+  N[i] <- rpois(1, lambda)
+  for(j in 1:n_pp) {
+    n[i,j] <- rbinom(n = 1, size = N[i], prob = p_surf)
+    for(k in 1:n_ss) {
+      count[i,j,k] <- rbinom(n = 1, size = n[i,j], prob = p_detect)
+    }
+  }
+}
+```
+
+
+```{r jags model}
+sink("Code/M1_Random.txt")
+  cat("
+    model{
+      # priors
+      lambda ~ dunif(10, 1000)
+      p_surf ~ dunif(0, 1)
+      p_detect ~ dunif(0, 1)
+      
+      # Likelihood
+      for(i in 1:n_sites) {
+        N[i] ~ dpois(lambda)
+        for(j in 1:n_pp) {
+          n[i,j] ~ dbin(p_surf, N[i])
+          for(k in 1:n_ss) {
+            count[i,j,k] ~ dbin(p_detect, n[i,j])
+            }
+          }
+        }
+      
+      } # end model statement
+    ", fill = TRUE)
+sink()
+```
+
+**Consider another model where p_surf can vary by site - might not be identifiable**
+
+```{r jags model 2}
+sink("Code/M2_Site_Specific_Surface.txt")
+  cat("
+    model{
+      # priors
+      lambda ~ dunif(10, 1000)
+      p_detect ~ dunif(0, 1)
+    for(i in 1:n_sites) {
+          p_surf[i] ~ dunif(0, 1) # make this random log-normal or Jeffery's prior
+    }
+      
+      # Likelihood
+      for(i in 1:n_sites) {
+        N[i] ~ dpois(lambda)
+        for(j in 1:n_pp) {
+          n[i,j] ~ dbin(p_surf[i], N[i])
+          for(k in 1:n_ss) {
+            count[i,j,k] ~ dbin(p_detect, n[i,j])
+            }
+          }
+        }
+      
+      } # end model statement
+    ", fill = TRUE)
+sink()
+```
+
+## Add autoregressive to surface activity (through n or p_surf)
+
+```{r jags model 2}
+sink("Code/M3_Surface_AR.txt")
+  cat("
+    model{
+      # priors
+      lambda ~ dunif(10, 1000)
+      p_detect ~ dunif(0, 1)
+    for(i in 1:n_sites) {
+          p_surf[i] ~ dunif(0, 1) # make this random log-normal or Jeffery's prior
+    }
+      
+      # Likelihood
+      for(i in 1:n_sites) {
+        N[i] ~ dpois(lambda)
+        for(j in 1:n_pp) {
+          n[i,j] ~ dbin(p_surf[i], N[i])
+          for(k in 1:n_ss) {
+            count[i,j,k] ~ dbin(p_detect, n[i,j])
+            }
+          }
+        }
+      
+      } # end model statement
+    ", fill = TRUE)
+sink()
+```
+
+```{r scenario 1 analysis}
+data_list <- list(n_sites = n_sites,
+                  n_pp = n_pp,
+                  n_ss = n_ss,
+                  count = count)
+
+inits1 <- function() {
+  list(#lambda = median((count + 1) * 2)
+    p_surf = runif(1, 0.1, 0.8)
+       )
+}
+
+params = c("lambda",
+           "p_surf",
+           "p_detect", 
+           "N",
+           "n")
+
+n.burn = 60000
+n.thin = 1
+n.it = 100000
+nc = 3
+
+  CL <- makeCluster(nc)
+    clusterExport(cl=CL, list("data_list", "inits1", "n.burn", "n.thin", "n.it", "params", "count"), envir = environment())
+    clusterSetRNGStream(cl=CL, iseed = 2345642)
+    
+    system.time(out <- clusterEvalQ(CL, {
+      library(rjags)
+      #load.module('glm')
+      jm <- jags.model("Code/M1_Random.txt", data_list, inits = inits1, n.adapt = n.burn, n.chains=1)
+      fm <- coda.samples(jm, params, n.iter = n.it, thin = n.thin)
+      return(as.mcmc(fm))
+    }))
+    
+    M1 <- mcmc.list(out)
+    
+    stopCluster(CL)
+
+
+plot(M1[ , c("lambda", "p_surf", "p_detect")])
+summary(M1)
+```
+
+
+## Scenario 2:
+
+Some individuals come to the surface with greater frequency
+
+```{r}
+
+lambda <- 100
+N <- rpois(100, lambda)
+
+n_sites <- 100
+n_pp <- 3
+n_ss <- 3
+p_detect <- 0.70 # prob that if on surface you detect the individual
+
+# prob of any individual being in the surface population
+# 3 strategies: almost always at surafce, sometimes, almost never
+p_surf1 <- 0.95
+p_surf2 <- 0.5
+p_surf3 <- 0.05
+
+n <- matrix(NA_integer_, n_sites, n_pp)
+
+# i sites
+# j primary periods
+# k secondary samples within each primary period
+
+# get number on surface each night
+p_surf_ind <- list() #matrix(NA_integer_, n_sites, N[i]) # prob of individual being on surface
+surf_ind <- list() #array(NA_integer_, dim = c(n_sites, n_pp, N[i])) # bernoulli result of    individual actually being on surface
+for(i in 1:n_sites) {
+  p_surf_ind[[i]] <- rep(NA, times = N[i])
+  surf_ind[[i]] <- matrix(NA, n_pp, N[i])
+  for(j in 1:n_pp) {
+    for(l in 1:N[i]) {
+      # prob of each individual being on the surface during all PP
+      p_surf_ind[[i]][l] <- sample(c(p_surf1, p_surf2, p_surf3), size = 1, prob = c(1/3, 1/3, 1/3))
+      # 0/1 surface activity of each individual in each PP
+      surf_ind[[i]][j,l] <- rbinom(1, 1, p_surf_ind[[i]][l])
+      }
+    n[i,j] <- sum(surf_ind[[i]][j, ])
+    }
+  }
+p_surf_mean <- mean(unlist(p_surf_ind))
+
+# Count (detection) process - assumes IF ON SURFACE all individuals have same detection prob
+count <- array(NA_integer_, dim = c(n_sites, n_pp, n_ss))
+for(i in 1:n_sites) {
+  for(j in 1:n_pp) {
+    for(k in 1:n_ss) {
+      count[i,j,k] <- rbinom(n = 1, size = n[i,j], prob = p_detect)
+    }
+  }
+}
+
+```
+
+```{r model 1 for scenario 2}
+data_list <- list(n_sites = n_sites,
+                  n_pp = n_pp,
+                  n_ss = n_ss,
+                  count = count)
+
+inits1 <- function() {
+  list(#lambda = median((count + 1) * 2)
+    p_surf = runif(1, 0.1, 0.8)
+       )
+}
+
+params = c("lambda",
+           "p_surf",
+           "p_detect", 
+           "N",
+           "n")
+
+n.burn = 60000
+n.thin = 1
+n.it = 100000
+nc = 3
+
+  CL <- makeCluster(nc)
+    clusterExport(cl=CL, list("data_list", "inits1", "n.burn", "n.thin", "n.it", "params", "count"), envir = environment())
+    clusterSetRNGStream(cl=CL, iseed = 2345642)
+    
+    system.time(out <- clusterEvalQ(CL, {
+      library(rjags)
+      load.module('glm')
+      jm <- jags.model("Code/M1_Random.txt", data_list, inits = inits1, n.adapt = n.burn, n.chains=1)
+      fm <- coda.samples(jm, params, n.iter = n.it, thin = n.thin)
+      return(as.mcmc(fm))
+    }))
+    
+    M1S2 <- mcmc.list(out)
+    
+    stopCluster(CL)
+
+
+plot(M1S2[ , c("lambda", "p_surf", "p_detect")])
+summary(M1S2)
+
+```
+
+
+## Scenario 3:
+
+Individuals come to the surface with greater frequency than others but these surface activity periods are not random. For example, if an individual is on the surface on night 1 it is more likely to be on the surface the following nights and even the following weeks.
+
+**Haven't implimented this yet**
+
+```{r scenario 3}
+
+lam <- 100
+N <- rpois(100, lam)
+
+# prob of any individual being in the surface population
+# 3 strategies: almost always at surafce, sometimes, almost never
+p_surf1 <- 0.95
+p_surf2 <- 0.5
+p_surf3 <- 0.05
+
+# prob of remaining in current condition (surface or belowground)
+p_remain <- 0.9
+p_trans <- 1 - p_remain
+
+# i sites
+# j primary periods
+# k secondary samples within each primary period
+
+n <- matrix(NA_integer_, n_sites, n_pp)
+# get number on surface each night
+p_surf_ind <- list() #matrix(NA_integer_, n_sites, N[i]) # prob of individual being on surface
+surf_ind <- list() #array(NA_integer_, dim = c(n_sites, n_pp, N[i])) # bernoulli result of    individual actually being on surface
+for(i in 1:n_sites) {
+  p_surf_ind[[i]] <- rep(NA, times = N[i])
+  surf_ind[[i]] <- matrix(NA, n_pp, N[i])
+    for(l in 1:N[i]) {
+      # each individual gets prob of surface on day 1
+      p_surf_ind[[i]][l] <- sample(c(p_surf1, p_surf2, p_surf3), size = 1, prob = c(1/3, 1/3, 1/3))
+      surf_ind[[i]][1, l] <- rbinom(1, 1, p_surf_ind[[i]][l])
+  for(j in 2:n_pp) {
+    # on surface dependent on the previous (AR1 process)
+    surf_ind[[i]][j, l] <- sample(c(surf_ind[[i]][j-1, l], 1-surf_ind[[i]][j-1, l]), size = 1, prob = c(p_remain, p_trans))
+      }
+  }
+  for(j in 1:n_pp) {
+    n[i,j] <- sum(surf_ind[[i]][j, ]) # total number surface active in each PP
+    }
+  }
+p_surf_mean <- mean(n[i,j] / N)
+
+# Count (detection) process conditional on surface activity and equal for all individuals
+count <- array(NA_integer_, dim = c(n_sites, n_pp, n_ss))
+for(i in 1:n_sites) {
+  for(j in 1:n_pp) {
+    for(k in 1:n_ss) {
+      count[i,j,k] <- rbinom(n = 1, size = n[i,j], prob = p_detect)
+    }
+  }
+}
+
+```
+
+```{r model 1 for scenario 3}
+data_list <- list(n_sites = n_sites,
+                  n_pp = n_pp,
+                  n_ss = n_ss,
+                  count = count)
+
+inits1 <- function() {
+  list(#lambda = median((count + 1) * 2)
+    p_surf = runif(1, 0.1, 0.8)
+       )
+}
+
+params = c("lambda",
+           "p_surf",
+           "p_detect", 
+           "N",
+           "n")
+
+n.burn = 60000
+n.thin = 1
+n.it = 100000
+nc = 3
+
+  CL <- makeCluster(nc)
+    clusterExport(cl=CL, list("data_list", "inits1", "n.burn", "n.thin", "n.it", "params", "count"), envir = environment())
+    clusterSetRNGStream(cl=CL, iseed = 2345642)
+    
+    system.time(out <- clusterEvalQ(CL, {
+      library(rjags)
+      load.module('glm')
+      jm <- jags.model("Code/M1_Random.txt", data_list, inits = inits1, n.adapt = n.burn, n.chains=1)
+      fm <- coda.samples(jm, params, n.iter = n.it, thin = n.thin)
+      return(as.mcmc(fm))
+    }))
+    
+    M1S3 <- mcmc.list(out)
+    
+    stopCluster(CL)
+
+
+plot(M1S3[ , c("lambda", "p_surf", "p_detect")])
+summary(M1S3)
+
+```
+
+
+```{r model 2 for scenario 3}
+data_list <- list(n_sites = n_sites,
+                  n_pp = n_pp,
+                  n_ss = n_ss,
+                  count = count)
+
+inits1 <- function() {
+  list(#lambda = median((count + 1) * 2)
+    p_detect = runif(1, 0.1, 0.8)
+       )
+}
+
+params = c("lambda",
+           "p_surf",
+           "p_detect", 
+           "N",
+           "n")
+
+n.burn = 60000
+n.thin = 1
+n.it = 100000
+nc = 3
+
+  CL <- makeCluster(nc)
+    clusterExport(cl=CL, list("data_list", "inits1", "n.burn", "n.thin", "n.it", "params", "count"), envir = environment())
+    clusterSetRNGStream(cl=CL, iseed = 2345642)
+    
+    system.time(out <- clusterEvalQ(CL, {
+      library(rjags)
+      load.module('glm')
+      jm <- jags.model("Code/M2_Site_Specific_Surface.txt", data_list, inits = inits1, n.adapt = n.burn, n.chains=1)
+      fm <- coda.samples(jm, params, n.iter = n.it, thin = n.thin)
+      return(as.mcmc(fm))
+    }))
+    
+    M2S3 <- mcmc.list(out)
+    
+    stopCluster(CL)
+
+
+plot(M2S3[ , c("lambda", "p_detect")])
+summary(M2S3)
+
+```
+
+
+# consider seeing if dail-madsen can pick this up with adjusted interpretation
+
+dail madsen with constraint on n
+```{r}
+sink("Code/M1.txt")
+cat("
+  model{
+  lambda ~ dunif(0, 600)
+gam0 ~ dnorm(0, 0.01)
+gam1 ~ dnorm(0, 0.01)
+omega ~ dunif(0, 1)
+p_detect ~ dunif(0, 1)
+for(i in 1:n_sites) {
+  n[i,1] ~ dpois(lambda)
+  for(k in 1:n_ss) {
+     y[i,1,k] ~ dbin(p_detect, n[i,1])
+  }
+  for(t in 2:n_pp) {
+    S[i,t-1] ~ dbin(omega, n[i,t-1])
+    gamma[i,t-1] <- exp(gam0 + gam1*n[i,t-1])
+    G[i,t-1] ~ dpois(gamma[i,t-1])
+    n[i,t] <- S[i,t-1] + G[i,t-1]
+    for(k in 1:n_ss) {
+       y[i,t,k] ~ dbin(p_detect, n[i,t])
+       }
+    }
+  }
+}
+", fill = T)
+sink()
+
+data_list <- list(n_sites = n_sites,
+                  n_pp = n_pp,
+                  n_ss = n_ss,
+                  y = count)
+
+inits1 <- function() {
+  list(#lambda = median((count + 1) * 2)
+    p_detect = runif(1, 0.1, 0.9)
+    #p_surf = runif(1, 0.1, 0.8)
+       )
+}
+
+params = c("lambda",
+           #"p_surf",
+           "p_detect", 
+           #"N",
+           "n")
+
+n.burn = 1
+n.thin = 1
+n.it = 1000
+nc = 3
+
+  CL <- makeCluster(nc)
+    clusterExport(cl=CL, list("data_list", "inits1", "n.burn", "n.thin", "n.it", "params", "count"), envir = environment())
+    clusterSetRNGStream(cl=CL, iseed = 2345642)
+    
+    system.time(out <- clusterEvalQ(CL, {
+      library(rjags)
+      #load.module('glm')
+      jm <- jags.model("Code/M1.txt", data_list, inits = inits1, n.adapt = n.burn, n.chains=1)
+      fm <- coda.samples(jm, params, n.iter = n.it, thin = n.thin)
+      return(as.mcmc(fm))
+    }))
+    
+    M1 <- mcmc.list(out)
+    
+    stopCluster(CL)
+
+
+plot(M1[ , c("lambda", "p_detect")])
+summary(M1)
+```
+

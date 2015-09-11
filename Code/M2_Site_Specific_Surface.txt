@@ -1,0 +1,22 @@
+
+    model{
+      # priors
+      lambda ~ dunif(10, 1000)
+      p_detect ~ dunif(0, 1)
+    for(i in 1:n_sites) {
+          p_surf[i] ~ dunif(0, 1) # make this random log-normal or Jeffery's prior
+    }
+      
+      # Likelihood
+      for(i in 1:n_sites) {
+        N[i] ~ dpois(lambda)
+        for(j in 1:n_pp) {
+          n[i,j] ~ dbin(p_surf[i], N[i])
+          for(k in 1:n_ss) {
+            count[i,j,k] ~ dbin(p_detect, n[i,j])
+            }
+          }
+        }
+      
+      } # end model statement
+    

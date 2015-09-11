@@ -1,0 +1,24 @@
+
+  model{
+  lambda ~ dunif(0, 600)
+gam0 ~ dnorm(0, 0.01)
+gam1 ~ dnorm(0, 0.01)
+omega ~ dunif(0, 1)
+p_detect ~ dunif(0, 1)
+for(i in 1:n_sites) {
+  n[i,1] ~ dpois(lambda)
+  for(k in 1:n_ss) {
+     y[i,1,k] ~ dbin(p_detect, n[i,1])
+  }
+  for(t in 2:n_pp) {
+    S[i,t-1] ~ dbin(omega, n[i,t-1])
+    gamma[i,t-1] <- exp(gam0 + gam1*n[i,t-1])
+    G[i,t-1] ~ dpois(gamma[i,t-1])
+    n[i,t] <- S[i,t-1] + G[i,t-1]
+    for(k in 1:n_ss) {
+       y[i,t,k] ~ dbin(p_detect, n[i,t])
+       }
+    }
+  }
+}
+
